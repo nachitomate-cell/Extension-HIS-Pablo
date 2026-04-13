@@ -1,13 +1,5 @@
 /**
- * ═══════════════════════════════════════════════════════════════
- *  popup.js — Controlador del Popup
- * ═══════════════════════════════════════════════════════════════
- *  Responsabilidades:
- *    1. Capturar clic en "Generar y Descargar Reporte"
- *    2. Leer configuración del popup (fechas, etc.)
- *    3. Enviar mensaje al content.js de la pestaña activa
- *    4. Mostrar el log de progreso que devuelve content.js
- * ═══════════════════════════════════════════════════════════════
+ * popup.js — Controlador del Popup
  */
 
 const btnGenerate = document.getElementById('btn-generate');
@@ -15,7 +7,6 @@ const statusEl    = document.getElementById('status');
 const fechaDesde  = document.getElementById('fecha-desde');
 const fechaHasta  = document.getElementById('fecha-hasta');
 
-// ── Utilidad: agregar línea al log visible ──────────────────
 function log(text, type = 'info') {
   statusEl.classList.add('visible');
   const line = document.createElement('div');
@@ -25,29 +16,49 @@ function log(text, type = 'info') {
   statusEl.scrollTop = statusEl.scrollHeight;
 }
 
-// ── Handler del botón principal ─────────────────────────────
+function resetButton() {
+  btnGenerate.disabled = false;
+  btnGenerate.textContent = 'Generar y Descargar Reporte';
+}
+
+/**
+ * Inyecta content.js en la pestaña si aún no está cargado,
+ * luego envía el mensaje y espera la respuesta.
+ */
+async function enviarMensaje(tabId, payload) {
+  // 1. Inyectar el script (si ya existe, el guard en content.js lo ignorará)
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    files: ['content.js']
+  });
+
+  // 2. Pequeña pausa para que el script se inicialice
+  await new Promise(r => setTimeout(r, 400));
+
+  // 3. Enviar mensaje y esperar respuesta
+  return new Promise((resolve, reject) => {
+    chrome.tabs.sendMessage(tabId, payload, (response) => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+      } else {
+        resolve(response);
+      }
+    });
+  });
+}
+
 btnGenerate.addEventListener('click', async () => {
-  // Limpiar log anterior
   statusEl.innerHTML = '';
   statusEl.classList.remove('visible');
-
-  // Deshabilitar botón mientras corre
   btnGenerate.disabled = true;
   btnGenerate.textContent = 'Procesando…';
   log('Conectando con la pestaña activa…');
 
   try {
-    // 1. Obtener la pestaña activa
-    const [tab] = await chrome.tabs.query({
-      active: true,
-      currentWindow: true
-    });
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
 
-    if (!tab) {
-      throw new Error('No se encontró una pestaña activa.');
-    }
+    if (!tab) throw new Error('No se encontró una pestaña activa.');
 
-    // Validar que estamos en el dominio correcto
     if (!tab.url?.includes('his.medicenter.cl')) {
       throw new Error(
         'La pestaña activa no es el portal HIS MediCenter. ' +
@@ -55,7 +66,6 @@ btnGenerate.addEventListener('click', async () => {
       );
     }
 
-    // 2. Construir payload con la configuración del popup
     const payload = {
       action: 'INICIAR_REPORTE',
       config: {
@@ -66,33 +76,17 @@ btnGenerate.addEventListener('click', async () => {
 
     log(`Rango: ${payload.config.fechaDesde} → ${payload.config.fechaHasta}`);
 
-    // 3. Enviar mensaje al content.js
-    chrome.tabs.sendMessage(tab.id, payload, (response) => {
-      if (chrome.runtime.lastError) {
-        log(
-          'Error de comunicación: ' + chrome.runtime.lastError.message,
-          'error'
-        );
-        resetButton();
-        return;
-      }
+    const response = await enviarMensaje(tab.id, payload);
 
-      if (response?.success) {
-        log(response.message, 'success');
-      } else {
-        log(response?.message || 'Error desconocido.', 'error');
-      }
-
-      resetButton();
-    });
+    if (response?.success) {
+      log(response.message, 'success');
+    } else {
+      log(response?.message || 'Error desconocido.', 'error');
+    }
 
   } catch (err) {
     log(err.message, 'error');
+  } finally {
     resetButton();
   }
 });
-
-function resetButton() {
-  btnGenerate.disabled = false;
-  btnGenerate.textContent = 'Generar y Descargar Reporte';
-}
