@@ -46,6 +46,10 @@ const DEFAULT_VALUES = {
 /** Clave usada en sessionStorage para persistir la config entre navegaciones */
 const STORAGE_KEY = 'medicenter_ext_pending';
 
+/** Fecha del día que se está procesando actualmente (DD/MM/YYYY).
+ *  El interceptor de descargas la usa para nombrar el archivo. */
+let fechaEnProceso = null;
+
 
 // ─────────────────────────────────────────────────────────────────────
 // ██  SECCIÓN 2: UTILIDADES                                         ██
@@ -87,40 +91,46 @@ function encontrarBotonExcel() {
 }
 
 /**
- * Intercepta clicks en enlaces con blob: URL (generados por DataTables al exportar)
- * y los descarga directamente a la carpeta de Descargas sin diálogo.
+ * Intercepta la descarga de Excel generada por DataTables.
  *
- * Se instala una sola vez en fase de captura para atrapar el evento
- * antes de que el navegador abra el diálogo "Guardar como".
+ * DataTables crea un <a> temporal, le asigna un blob: URL y llama
+ * elemento.click() directamente — sin disparar eventos del DOM.
+ * Por eso hay que sobreescribir HTMLAnchorElement.prototype.click.
  */
 function instalarInterceptorDescargas() {
-  document.addEventListener('click', function interceptarBlob(e) {
-    const a = e.target.closest('a[href^="blob:"], a[download]');
-    if (!a) return;
+  const clickOriginal = HTMLAnchorElement.prototype.click;
 
-    const href = a.getAttribute('href') || '';
-    if (!href.startsWith('blob:')) return;
+  HTMLAnchorElement.prototype.click = function () {
+    // Solo interceptar si es blob con atributo download (export de DataTables)
+    if (this.href && this.href.startsWith('blob:') && this.hasAttribute('download')) {
+      const url = this.href;
 
-    // Cancelar el click original (evita el diálogo del navegador)
-    e.preventDefault();
-    e.stopImmediatePropagation();
+      // Nombre: DD-MM-YYYY.xlsx según la fecha en proceso
+      const fechaStr = fechaEnProceso
+        ? fechaEnProceso.replace(/\//g, '-')   // "01/04/2026" → "01-04-2026"
+        : `reporte_${Date.now()}`;
+      const filename = `${fechaStr}.xlsx`;
 
-    // Nombre del archivo: usa el atributo download o un nombre por defecto
-    const filename = a.getAttribute('download') || `reporte_${Date.now()}.xlsx`;
+      console.log(`[MediCenter Ext] Interceptando descarga → ${filename}`);
 
-    // Pedir al background que descargue sin diálogo
-    chrome.runtime.sendMessage({
-      action:   'DESCARGAR_ARCHIVO',
-      url:      href,
-      filename: filename
-    }, (resp) => {
-      if (resp?.ok) {
-        console.log(`[MediCenter Ext] Descarga automática: ${filename}`);
-      } else {
-        console.error('[MediCenter Ext] Error en descarga:', resp?.error);
-      }
-    });
-  }, true); // true = fase de captura (antes que DataTables limpie el blob)
+      chrome.runtime.sendMessage(
+        { action: 'DESCARGAR_ARCHIVO', url, filename },
+        (resp) => {
+          if (resp?.ok) {
+            console.log(`[MediCenter Ext] ✓ Guardado: ${filename}`);
+          } else {
+            console.error('[MediCenter Ext] Error descarga:', resp?.error);
+          }
+        }
+      );
+
+      // No llamar al click original: evita el diálogo del navegador
+      return;
+    }
+
+    // Para cualquier otro <a>, comportamiento normal
+    return clickOriginal.call(this);
+  };
 
   console.log('[MediCenter Ext] Interceptor de descargas instalado.');
 }
@@ -402,6 +412,7 @@ async function llenarFormularioYBuscar(config = {}) {
   for (let dIdx = 0; dIdx < dias.length; dIdx++) {
     const dia = dias[dIdx];
     console.log(`[MediCenter Ext] ── Día: ${dia} ──`);
+    fechaEnProceso = dia; // el interceptor usará esta fecha para nombrar el archivo
 
     // ── 0. Activar switch ANTES de elegir la fecha ────────────────
     asegurarSwitchOn();
@@ -450,6 +461,8 @@ async function llenarFormularioYBuscar(config = {}) {
       // 8. Descargar Excel
       const btnExcel = encontrarBotonExcel();
       if (btnExcel) {
+        // Guardar fecha actual para que background.js renombre el archivo
+        chrome.storage.local.set({ fechaDescarga: dia });
         btnExcel.click();
         totalDescargados++;
         console.log(`[MediCenter Ext] ✓ Descargado: ${dia} | ${suc.text}`);
